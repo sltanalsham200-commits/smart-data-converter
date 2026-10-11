@@ -1,18 +1,29 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from bs4 import BeautifulSoup
 import csv
 import io
+import os
 import re
 import unicodedata
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 app = FastAPI(
     title="Smart Data Converter & Cleaner API",
     description="يحوّل بيانات CSV و HTML إلى JSON نظيف ومنظم",
     version="1.0.0"
 )
+
+# API Key from environment
+API_KEY = os.getenv("API_KEY", "")
+
+
+async def verify_api_key(x_api_key: Optional[str] = Header(None)):
+    if not API_KEY:
+        return  # If no API_KEY set, allow (for development)
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="مفتاح API غير صالح")
 
 
 class HTMLInput(BaseModel):
@@ -62,16 +73,13 @@ def parse_html_table(html: str) -> List[Dict[str, Any]]:
     table = soup.find("table")
     if not table:
         raise HTTPException(status_code=400, detail="لم يتم العثور على جدول في HTML")
-
     rows = table.find_all("tr")
     if len(rows) < 2:
         raise HTTPException(status_code=400, detail="الجدول لا يحتوي على بيانات كافية")
-
     headers = []
     header_cells = rows[0].find_all(["th", "td"])
     for cell in header_cells:
         headers.append(normalize_field_name(cell.get_text()))
-
     data = []
     for row in rows[1:]:
         cells = row.find_all(["td", "th"])
@@ -101,6 +109,7 @@ def root():
     return {
         "name": "Smart Data Converter & Cleaner API",
         "version": "1.0.0",
+        "auth": "required (X-API-Key header)",
         "endpoints": {
             "/convert/csv": "POST - رفع ملف CSV وتحويله إلى JSON",
             "/convert/html": "POST - إرسال HTML وتحويل جدوله إلى JSON",
@@ -115,17 +124,16 @@ def health():
 
 
 @app.post("/convert/csv")
-async def convert_csv(file: UploadFile = File(...)):
+async def convert_csv(file: UploadFile = File(...), x_api_key: Optional[str] = Header(None)):
+    await verify_api_key(x_api_key)
     if not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="الملف يجب أن يكون بصيغة CSV")
-
     try:
         content = await file.read()
         try:
             text = content.decode("utf-8")
         except UnicodeDecodeError:
             text = content.decode("latin-1")
-
         reader = csv.DictReader(io.StringIO(text))
         records = []
         for row in reader:
@@ -133,9 +141,7 @@ async def convert_csv(file: UploadFile = File(...)):
             records.append(record)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"خطأ في قراءة CSV: {str(e)}")
-
     cleaned = remove_duplicates(records)
-
     return JSONResponse({
         "success": True,
         "original_rows": len(records),
@@ -147,14 +153,13 @@ async def convert_csv(file: UploadFile = File(...)):
 
 
 @app.post("/convert/html")
-async def convert_html(payload: HTMLInput):
+async def convert_html(payload: HTMLInput, x_api_key: Optional[str] = Header(None)):
+    await verify_api_key(x_api_key)
     if not payload.html.strip():
         raise HTTPException(status_code=400, detail="HTML فارغ")
-
     cleaned_html = clean_html(payload.html)
     records = parse_html_table(cleaned_html)
     cleaned = remove_duplicates(records)
-
     return JSONResponse({
         "success": True,
         "original_rows": len(records),
