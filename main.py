@@ -56,7 +56,7 @@ class SizeLimitMiddleware:
             return await self.app(scope, receive, send)
 
         path = scope.get("path", "")
-        if not path.startswith("/convert/"):
+        if not (path.startswith("/convert/") or path.startswith("/v1/convert/")):
             return await self.app(scope, receive, send)
 
         # Fast path: reject based on Content-Length if present
@@ -125,7 +125,7 @@ app = FastAPI(
         "**الحالات المدعومة**: أصفار بادئة، أرقام عربية، أعمدة مكررة، BOM.\n\n"
         "**غير مدعوم**: rowspan/colspan، الفاصلة المنقوطة، جداول متعددة."
     ),
-    version="1.1.1",
+    version="1.1.3",
 )
 
 app.add_middleware(SizeLimitMiddleware, max_size=MAX_REQUEST_SIZE)
@@ -297,10 +297,12 @@ def remove_duplicates(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 @app.get("/", summary="معلومات API")
+@app.get("/v1", include_in_schema=False)
+@app.get("/v1/", summary="معلومات API (v1)")
 def root():
     return {
         "name": "Smart Data Converter & Cleaner API",
-        "version": "1.1.1",
+        "version": "1.1.3",
         "auth": "required (X-API-Key)",
         "limits": {"max_file_bytes": MAX_FILE_SIZE, "max_html_bytes": MAX_HTML_SIZE},
         "endpoints": {
@@ -312,11 +314,13 @@ def root():
 
 
 @app.get("/health", summary="فحص الحالة")
+@app.get("/v1/health", summary="فحص الحالة (v1)")
 def health():
     return {"status": "ok"}
 
 
 @app.post("/convert/csv", summary="تحويل CSV إلى JSON")
+@app.post("/v1/convert/csv", summary="تحويل CSV إلى JSON (v1)")
 async def convert_csv(
     file: UploadFile = File(...),
     x_api_key: Optional[str] = Header(None),
@@ -397,6 +401,7 @@ async def convert_csv(
 
 
 @app.post("/convert/html", summary="تحويل HTML إلى JSON")
+@app.post("/v1/convert/html", summary="تحويل HTML إلى JSON (v1)")
 async def convert_html(
     payload: HTMLInput,
     x_api_key: Optional[str] = Header(None),
