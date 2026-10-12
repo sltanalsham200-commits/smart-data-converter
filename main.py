@@ -195,28 +195,92 @@ def clean_html(html: str) -> str:
     return str(soup)
 
 
+def _safe_span(cell, attr: str, cap: int = 100) -> int:
+    """قراءة آمنة لـ colspan/rowspan مع حد أعلى لمنع DoS."""
+    try:
+        n = int(cell.get(attr, "1"))
+        return max(1, min(n, cap))
+    except (ValueError, TypeError):
+        return 1
+
+
+def _strip_nested_tables(table) -> int:
+    """يزيل الجداول المتداخلة. يعيد عدد الجداول التي أُزيلت."""
+    nested = table.find_all("table")
+    for n in nested:
+        if n is not table:
+            n.decompose()
+    return len(nested)
+
+
 def parse_html_table(html: str) -> List[Dict[str, Any]]:
+    """يحوّل أول جدول HTML إلى JSON مع دعم rowspan و colspan."""
     soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table")
     if not table:
         raise HTTPException(status_code=400, detail="لم يتم العثور على جدول في HTML")
+
+    # إزالة الجداول المتداخلة لمنع خلط البيانات
+    _strip_nested_tables(table)
+
     rows = table.find_all("tr")
     if len(rows) < 2:
         raise HTTPException(status_code=400, detail="الجدول لا يحتوي على بيانات كافية")
-    headers = []
-    header_cells = rows[0].find_all(["th", "td"])
-    for cell in header_cells:
-        headers.append(normalize_field_name(cell.get_text()))
-    headers = ensure_unique_columns(headers)
-    data = []
-    for row in rows[1:]:
+
+    grid: List[List[str]] = []
+    active_spans: Dict[int, List[Any]] = {}
+
+    for row in rows:
         cells = row.find_all(["td", "th"])
-        if not cells:
+        current: List[str] = []
+        col = 0
+
+        for cell in cells:
+            # إدراج خلايا rowspan النشطة
+            while col in active_spans:
+                text, remaining = active_spans[col]
+                current.append(text)
+                if remaining <= 1:
+                    del active_spans[col]
+                else:
+                    active_spans[col] = [text, remaining - 1]
+                col += 1
+
+            text = cell.get_text()
+            colspan = _safe_span(cell, "colspan")
+            rowspan = _safe_span(cell, "rowspan")
+
+            for k in range(colspan):
+                current.append(text)
+                if rowspan > 1:
+                    active_spans[col + k] = [text, rowspan - 1]
+            col += colspan
+
+        # إدراج rowspan المتبقية في نهاية الصف
+        while col in active_spans:
+            text, remaining = active_spans[col]
+            current.append(text)
+            if remaining <= 1:
+                del active_spans[col]
+            else:
+                active_spans[col] = [text, remaining - 1]
+            col += 1
+
+        grid.append(current)
+
+    if not grid or not grid[0]:
+        raise HTTPException(status_code=400, detail="الجدول لا يحتوي على بيانات كافية")
+
+    headers = ensure_unique_columns([normalize_field_name(h) for h in grid[0]])
+
+    data: List[Dict[str, Any]] = []
+    for raw_row in grid[1:]:
+        if not raw_row:
             continue
         record: Dict[str, Any] = {}
-        for i, cell in enumerate(cells):
+        for i, val in enumerate(raw_row):
             key = headers[i] if i < len(headers) else f"field_{i}"
-            record[key] = clean_value(cell.get_text())
+            record[key] = clean_value(val)
         data.append(record)
     return data
 
