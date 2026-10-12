@@ -3,6 +3,7 @@ import io
 import logging
 import os
 import re
+import secrets
 import unicodedata
 from typing import Any, Dict, List, Optional
 
@@ -135,7 +136,7 @@ class HTMLInput(BaseModel):
 
 
 async def verify_api_key(x_api_key: Optional[str] = Header(None)):
-    if x_api_key != API_KEY:
+    if not x_api_key or not secrets.compare_digest(x_api_key, API_KEY):
         raise HTTPException(status_code=401, detail="مفتاح API غير صالح")
 
 

@@ -4,3 +4,10 @@ __pycache__/
 venv/
 .env
 .pytest_cache/
+
+# Backups
+*.backup
+*.bak
+*.v111-backup
+*.v*-backup
+main.py.before-*
