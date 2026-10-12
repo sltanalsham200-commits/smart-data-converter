@@ -10,7 +10,6 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from starlette.middleware.base import BaseHTTPMiddleware
 
 # ---------------------------------------------------------------------------
 # FAIL-FAST: refuse to start if API_KEY is missing or empty.
@@ -39,20 +38,81 @@ logger = logging.getLogger("smart_data_converter")
 MAX_REQUEST_SIZE = 1024 * 1024  # 1 MB hard cap for Content-Length
 
 
-class SizeLimitMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        if request.url.path.startswith("/convert/"):
-            cl = request.headers.get("content-length")
-            if cl:
-                try:
-                    if int(cl) > MAX_REQUEST_SIZE:
-                        return JSONResponse(
-                            {"detail": "حجم الطلب يتجاوز الحد الأقصى (1 MB)"},
-                            status_code=413,
-                        )
-                except ValueError:
-                    pass
-        return await call_next(request)
+class SizeLimitMiddleware:
+    """Pure ASGI middleware: enforces a max request body size, including
+    chunked/streamed requests without Content-Length.
+
+    The body is counted as it is received; if it exceeds the limit, the
+    response is replaced with a 413 payload, regardless of what the
+    endpoint tries to return."""
+
+    def __init__(self, app, max_size: int = MAX_REQUEST_SIZE):
+        self.app = app
+        self.max_size = max_size
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            return await self.app(scope, receive, send)
+
+        path = scope.get("path", "")
+        if not path.startswith("/convert/"):
+            return await self.app(scope, receive, send)
+
+        # Fast path: reject based on Content-Length if present
+        headers = dict(scope.get("headers", []))
+        cl = headers.get(b"content-length")
+        if cl is not None:
+            try:
+                if int(cl) > self.max_size:
+                    return await self._reply(send, 413,
+                        "حجم الطلب يتجاوز الحد الأقصى (1 MB)")
+            except (ValueError, TypeError):
+                return await self._reply(send, 400,
+                    "قيمة Content-Length غير صالحة")
+
+        # Slow path: count bytes as they arrive
+        bytes_seen = 0
+        over_limit = False
+
+        async def limited_receive():
+            nonlocal bytes_seen, over_limit
+            msg = await receive()
+            if msg.get("type") == "http.request":
+                body = msg.get("body", b"")
+                bytes_seen += len(body)
+                if bytes_seen > self.max_size:
+                    over_limit = True
+                    return {"type": "http.request",
+                            "body": b"",
+                            "more_body": False}
+            return msg
+
+        response_sent = False
+
+        async def limited_send(msg):
+            nonlocal response_sent
+            if over_limit and not response_sent:
+                response_sent = True
+                await self._reply(send, 413,
+                    "حجم الطلب يتجاوز الحد الأقصى (1 MB)")
+                return
+            if response_sent:
+                return
+            await send(msg)
+
+        await self.app(scope, limited_receive, limited_send)
+
+    async def _reply(self, send, status: int, detail: str):
+        body = ('{"detail":"' + detail + '"}').encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": status,
+            "headers": [
+                (b"content-type", b"application/json; charset=utf-8"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
 
 
 app = FastAPI(
@@ -67,7 +127,7 @@ app = FastAPI(
     version="1.1.1",
 )
 
-app.add_middleware(SizeLimitMiddleware)
+app.add_middleware(SizeLimitMiddleware, max_size=MAX_REQUEST_SIZE)
 
 
 class HTMLInput(BaseModel):
