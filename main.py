@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # ---------------------------------------------------------------------------
 # FAIL-FAST: refuse to start if API_KEY is missing or empty.
@@ -35,6 +36,25 @@ MAX_HTML_SIZE = 500 * 1024
 
 logger = logging.getLogger("smart_data_converter")
 
+MAX_REQUEST_SIZE = 1024 * 1024  # 1 MB hard cap for Content-Length
+
+
+class SizeLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        if request.url.path.startswith("/convert/"):
+            cl = request.headers.get("content-length")
+            if cl:
+                try:
+                    if int(cl) > MAX_REQUEST_SIZE:
+                        return JSONResponse(
+                            {"detail": "حجم الطلب يتجاوز الحد الأقصى (1 MB)"},
+                            status_code=413,
+                        )
+                except ValueError:
+                    pass
+        return await call_next(request)
+
+
 app = FastAPI(
     title="Smart Data Converter & Cleaner API",
     description=(
@@ -46,6 +66,8 @@ app = FastAPI(
     ),
     version="1.1.1",
 )
+
+app.add_middleware(SizeLimitMiddleware)
 
 
 class HTMLInput(BaseModel):
@@ -192,33 +214,50 @@ async def convert_csv(
         )
 
     try:
-        try:
-            text = content.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            text = content.decode("latin-1")
-
-        reader = csv.DictReader(io.StringIO(text), strict=True)
-        if reader.fieldnames is None:
-            raise HTTPException(status_code=400, detail="لا توجد رؤوس أعمدة")
-
-        normalized_headers = ensure_unique_columns(
-            [normalize_field_name(h) for h in reader.fieldnames]
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(
+            status_code=400,
+            detail="ترميز الملف غير مدعوم. استخدم UTF-8.",
         )
 
-        records = []
-        for row in reader:
-            record = {}
-            for original_key, normalized_key in zip(reader.fieldnames, normalized_headers):
-                record[normalized_key] = clean_value(row.get(original_key))
-            records.append(record)
-    except HTTPException:
-        raise
+    if "\x00" in text:
+        raise HTTPException(
+            status_code=400,
+            detail="الملف يحتوي على ترميز غير مدعوم.",
+        )
+
+    try:
+        reader = csv.reader(io.StringIO(text), strict=True)
+        raw_rows = list(reader)
+    except csv.Error:
+        raise HTTPException(
+            status_code=400,
+            detail="تعذر قراءة ملف CSV. تأكد من صحة صيغة الملف.",
+        )
     except Exception:
         logger.exception("CSV parsing failed")
         raise HTTPException(
             status_code=400,
             detail="تعذر قراءة ملف CSV. تأكد من صحة صيغة الملف.",
         )
+
+    if not raw_rows or not raw_rows[0]:
+        raise HTTPException(status_code=400, detail="لا توجد رؤوس أعمدة")
+
+    normalized_headers = ensure_unique_columns(
+        [normalize_field_name(h) for h in raw_rows[0]]
+    )
+
+    records = []
+    for raw in raw_rows[1:]:
+        if not raw:
+            continue
+        record = {}
+        for i, val in enumerate(raw):
+            key = normalized_headers[i] if i < len(normalized_headers) else f"field_{i}"
+            record[key] = clean_value(val)
+        records.append(record)
 
     cleaned = remove_duplicates(records)
 
