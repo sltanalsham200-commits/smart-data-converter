@@ -197,7 +197,7 @@ async def convert_csv(
         except UnicodeDecodeError:
             text = content.decode("latin-1")
 
-        reader = csv.DictReader(io.StringIO(text))
+        reader = csv.DictReader(io.StringIO(text), strict=True)
         if reader.fieldnames is None:
             raise HTTPException(status_code=400, detail="لا توجد رؤوس أعمدة")
 
