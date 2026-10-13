@@ -9,6 +9,7 @@ Handles:
 Coexists with legacy API_KEY (for backward compatibility).
 """
 import hashlib
+import logging
 import os
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -16,6 +17,8 @@ from typing import Optional
 
 from fastapi import HTTPException
 from supabase import create_client, Client
+
+logger = logging.getLogger("supabase_auth")
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +39,7 @@ def get_supabase_client() -> Optional[Client]:
     try:
         return create_client(url, key)
     except Exception:
+        logger.exception("Failed to create Supabase client")
         return None
 
 
@@ -90,6 +94,7 @@ def verify_subscriber_key(api_key: str, tool_name: str) -> Optional[dict]:
             .execute()
         )
     except Exception:
+        logger.exception("Supabase key lookup failed")
         return None
 
     if not key_resp.data:
@@ -114,6 +119,7 @@ def verify_subscriber_key(api_key: str, tool_name: str) -> Optional[dict]:
             {"p_api_key_id": api_key_id, "p_tool": tool_name},
         ).execute()
     except Exception:
+        logger.exception("Supabase RPC increment_usage failed")
         return None
 
     if not rpc_resp.data:
