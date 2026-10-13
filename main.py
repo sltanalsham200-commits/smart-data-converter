@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from supabase_auth import raise_for_subscriber_key
 
 # ---------------------------------------------------------------------------
 # FAIL-FAST: refuse to start if API_KEY is missing or empty.
@@ -136,8 +137,16 @@ class HTMLInput(BaseModel):
 
 
 async def verify_api_key(x_api_key: Optional[str] = Header(None)):
-    if not x_api_key or not secrets.compare_digest(x_api_key, API_KEY):
-        raise HTTPException(status_code=401, detail="مفتاح API غير صالح")
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail="مفتاح API مطلوب")
+
+    if x_api_key.startswith("tf_live_"):
+        return raise_for_subscriber_key(x_api_key, "smart-data-converter")
+
+    if secrets.compare_digest(x_api_key, API_KEY):
+        return {"legacy": True, "subscriber_id": None, "allowed": True}
+
+    raise HTTPException(status_code=401, detail="مفتاح API غير صالح")
 
 
 def normalize_field_name(name: str) -> str:

@@ -11,3 +11,13 @@ venv/
 *.v111-backup
 *.v*-backup
 main.py.before-*
+
+# Supabase credentials (DO NOT COMMIT)
+.supabase/
+db_url
+*.supabase
+
+# Local secrets — NEVER commit
+.env.local
+.env.*.local
+*.local
