@@ -1,17 +1,15 @@
 """
 Supabase-based authentication layer for Tools Forge API.
 
-Handles:
-- Per-subscriber API keys (SHA-256 hashed)
-- Subscription status verification
-- Atomic quota check via increment_usage RPC
+Uses unified verify_and_increment RPC (1 DB round-trip per request).
+Handles: per-subscriber quota, atomic locking, last_used_at update,
+and returns rate_limit_per_min for the in-memory rate limiter.
 
 Coexists with legacy API_KEY (for backward compatibility).
 """
 import hashlib
 import logging
 import os
-from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Optional
 
@@ -67,13 +65,16 @@ def verify_subscriber_key(api_key: str, tool_name: str) -> Optional[dict]:
     """
     Verify a subscriber's API key + check quota + increment usage.
 
+    Single DB round-trip via verify_and_increment RPC.
+
     Returns dict with:
         {
             "subscriber_id": UUID,
             "api_key_id": UUID,
             "allowed": bool,
             "current_usage": int,
-            "max_requests": int
+            "max_requests": int,
+            "rate_limit_per_min": int,
         }
     Or None if key is invalid/inactive/expired.
     """
@@ -83,43 +84,14 @@ def verify_subscriber_key(api_key: str, tool_name: str) -> Optional[dict]:
 
     key_hash = hash_api_key(api_key)
 
-    # 1. Find the key
-    try:
-        key_resp = (
-            client.table("api_keys")
-            .select("id, subscriber_id, status")
-            .eq("key_hash", key_hash)
-            .eq("status", "active")
-            .limit(1)
-            .execute()
-        )
-    except Exception:
-        logger.exception("Supabase key lookup failed")
-        return None
-
-    if not key_resp.data:
-        return None
-
-    key_row = key_resp.data[0]
-    api_key_id = key_row["id"]
-    subscriber_id = key_row["subscriber_id"]
-
-    # 2. Update last_used_at (fire-and-forget)
-    try:
-        client.table("api_keys").update(
-            {"last_used_at": datetime.now(timezone.utc).isoformat()}
-        ).eq("id", api_key_id).execute()
-    except Exception:
-        pass  # Not critical
-
-    # 3. Atomic quota check + increment via RPC
+    # Single RPC call: verify + increment + return rate_limit
     try:
         rpc_resp = client.rpc(
-            "increment_usage",
-            {"p_api_key_id": api_key_id, "p_tool": tool_name},
+            "verify_and_increment",
+            {"p_key_hash": key_hash, "p_tool": tool_name},
         ).execute()
     except Exception:
-        logger.exception("Supabase RPC increment_usage failed")
+        logger.exception("Supabase RPC verify_and_increment failed")
         return None
 
     if not rpc_resp.data:
@@ -127,12 +99,17 @@ def verify_subscriber_key(api_key: str, tool_name: str) -> Optional[dict]:
 
     row = rpc_resp.data[0] if isinstance(rpc_resp.data, list) else rpc_resp.data
 
+    # key_valid = False → invalid key, don't leak reason
+    if not row.get("key_valid", False):
+        return None
+
     return {
-        "subscriber_id": subscriber_id,
-        "api_key_id": api_key_id,
-        "allowed": row.get("allowed", False),
+        "subscriber_id": row.get("out_subscriber_id"),
+        "api_key_id": row.get("out_key_id"),
+        "allowed": row.get("quota_allowed", False),
         "current_usage": row.get("current_usage", 0),
         "max_requests": row.get("max_requests", 0),
+        "rate_limit_per_min": row.get("rate_limit_per_min", 0),
     }
 
 

@@ -12,6 +12,7 @@ from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from supabase_auth import raise_for_subscriber_key
+from rate_limit import limiter
 
 # ---------------------------------------------------------------------------
 # FAIL-FAST: refuse to start if API_KEY is missing or empty.
@@ -334,8 +335,20 @@ async def convert_csv(
     file: UploadFile = File(...),
     x_api_key: Optional[str] = Header(None),
 ):
-    await verify_api_key(x_api_key)
-
+    auth = await verify_api_key(x_api_key)
+    if not auth.get("legacy"):
+        allowed, count = limiter.check(
+            str(auth["api_key_id"]),
+            int(auth["rate_limit_per_min"]),
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"تجاوز حد الطلبات ({count}/"
+                    f"{auth['rate_limit_per_min']} في الدقيقة)"
+                ),
+            )
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="الملف يجب أن يكون بصيغة CSV")
 
@@ -415,8 +428,20 @@ async def convert_html(
     payload: HTMLInput,
     x_api_key: Optional[str] = Header(None),
 ):
-    await verify_api_key(x_api_key)
-
+    auth = await verify_api_key(x_api_key)
+    if not auth.get("legacy"):
+        allowed, count = limiter.check(
+            str(auth["api_key_id"]),
+            int(auth["rate_limit_per_min"]),
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"تجاوز حد الطلبات ({count}/"
+                    f"{auth['rate_limit_per_min']} في الدقيقة)"
+                ),
+            )
     if not payload.html or not payload.html.strip():
         raise HTTPException(status_code=400, detail="HTML فارغ")
 

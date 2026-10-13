@@ -21,3 +21,7 @@ db_url
 .env.local
 .env.*.local
 *.local
+
+# Pre-v4 backups
+*.before-v4
+*.before-*
