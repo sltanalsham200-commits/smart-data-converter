@@ -4,7 +4,25 @@
 # Runs in GitHub Actions. Outputs encrypted backup.
 # ============================================================
 set -euo pipefail
+# ---- Failure reporter: send tail to Telegram ----
+LOG_FILE="$(mktemp)"
+exec > >(tee -a "${LOG_FILE}") 2>&1
 
+on_fail() {
+  local code=$?
+  if [ $code -ne 0 ]; then
+    local tail_text
+    tail_text="$(tail -15 "${LOG_FILE}" | sed 's|postgresql://[^ ]*|[REDACTED]|g' | tr '\n' '|')"
+    if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+      curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d "chat_id=${TELEGRAM_CHAT_ID}" \
+        --data-urlencode "text=Backup FAILED exit ${code}
+
+${tail_text}" > /dev/null || true
+    fi
+  fi
+}
+trap on_fail EXIT
 # ---- Validate required env vars ----
 : "${SUPABASE_DB_URL:?missing SUPABASE_DB_URL}"
 : "${AGE_PUBLIC_KEY:?missing AGE_PUBLIC_KEY}"
