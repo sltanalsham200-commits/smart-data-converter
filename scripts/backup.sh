@@ -42,6 +42,7 @@ echo "==> Starting backup at ${TS}"
 # ---- 1. Dump ----
 echo "==> pg_dump..."
 pg_dump \
+  --schema=public \
   --no-owner \
   --no-privileges \
   --clean \
