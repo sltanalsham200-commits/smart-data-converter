@@ -1,0 +1,62 @@
+name: Database Backup
+
+on:
+  schedule:
+    # Every day at 02:00 UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:  # Allow manual runs
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install postgresql-client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Install age
+        run: |
+          AGE_VERSION="1.1.1"
+          curl -fsSL "https://github.com/FiloSottile/age/releases/download/v${AGE_VERSION}/age-v${AGE_VERSION}-linux-amd64.tar.gz" -o /tmp/age.tgz
+          tar -xzf /tmp/age.tgz -C /tmp
+          sudo mv /tmp/age/age /usr/local/bin/age
+          sudo mv /tmp/age/age-keygen /usr/local/bin/age-keygen
+          age --version
+
+      - name: Run backup
+        id: backup
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          AGE_PUBLIC_KEY: ${{ secrets.AGE_PUBLIC_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          chmod +x scripts/backup.sh
+          bash scripts/backup.sh
+
+      - name: Upload artifact (fallback)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-backup-${{ github.run_id }}
+          path: backup_out/*.age
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Notify failure via Telegram
+        if: failure()
+        env:
+          BOT: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          MSG="❌ Tools Forge Backup FAILED%0A${RUN_URL}"
+          curl -s -X POST "https://api.telegram.org/bot${BOT}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{\"chat_id\": \"${CHAT}\", \"text\": \"${MSG}\"}" || true
