@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from supabase_auth import raise_for_subscriber_key
@@ -134,6 +135,22 @@ app = FastAPI(
 )
 
 app.add_middleware(SizeLimitMiddleware, max_size=MAX_REQUEST_SIZE)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://tools-forge-landing.pages.dev",
+        "https://*.tools-forge-landing.pages.dev",
+        "http://localhost:3000",
+        "http://localhost:5500",
+        "http://localhost:8080",
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=3600,
+)
 app.include_router(user_router)
 app.include_router(payments_router)
 app.include_router(tools_router)
