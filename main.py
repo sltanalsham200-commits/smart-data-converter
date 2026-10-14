@@ -15,6 +15,7 @@ from supabase_auth import raise_for_subscriber_key
 from rate_limit import limiter
 from routes_user import router as user_router
 from routes_payments import router as payments_router
+from routes_tools import router as tools_router
 
 # ---------------------------------------------------------------------------
 # FAIL-FAST: refuse to start if API_KEY is missing or empty.
@@ -135,6 +136,7 @@ app = FastAPI(
 app.add_middleware(SizeLimitMiddleware, max_size=MAX_REQUEST_SIZE)
 app.include_router(user_router)
 app.include_router(payments_router)
+app.include_router(tools_router)
 
 
 class HTMLInput(BaseModel):
