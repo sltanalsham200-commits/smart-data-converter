@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from supabase_auth import raise_for_subscriber_key
 from rate_limit import limiter
+from routes_user import router as user_router
 
 # ---------------------------------------------------------------------------
 # FAIL-FAST: refuse to start if API_KEY is missing or empty.
@@ -131,6 +132,7 @@ app = FastAPI(
 )
 
 app.add_middleware(SizeLimitMiddleware, max_size=MAX_REQUEST_SIZE)
+app.include_router(user_router)
 
 
 class HTMLInput(BaseModel):

@@ -154,28 +154,43 @@ def test_quota_exhaustion(test_setup):
     client = test_setup["client"]
     api_key_id = test_setup["api_key_id"]
 
-    # Manually set usage to 499 (faster than 500 calls)
+    # Manually set usage to 499 for TODAY (faster than 500 calls)
+    # NOTE: RPC uses CURRENT_DATE, so we must match it exactly.
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).date().isoformat()
+
     client.table("usage_daily").upsert({
         "api_key_id": api_key_id,
         "subscriber_id": test_setup["subscriber"]["id"],
         "tool_name": "smart-data-converter",
-        "date": "2026-10-13",
+        "date": today,
         "request_count": 499,
-    }).execute()
+    }, on_conflict="api_key_id,date,tool_name").execute()
 
-    # Call 1: should be allowed (500/500)
+    # Call 1: should be allowed (uses last slot → 500/500)
     result = verify_subscriber_key(
         test_setup["plaintext_key"], "smart-data-converter"
     )
     assert result["allowed"] is True
     assert result["current_usage"] == 500
 
-    # Call 2: should be rejected (501/500)
+    # Call 2: should be rejected — Fair Quota: counter does NOT increment
     result = verify_subscriber_key(
         test_setup["plaintext_key"], "smart-data-converter"
     )
     assert result["allowed"] is False
-    assert result["current_usage"] == 501
+    # Fair Quota: rejected requests do not consume quota
+    assert result["current_usage"] == 500
+
+    # Verify DB counter stayed at 500 (Fair Quota confirmed)
+    db_row = (
+        client.table("usage_daily")
+        .select("request_count")
+        .eq("api_key_id", api_key_id)
+        .eq("tool_name", "smart-data-converter")
+        .execute()
+    )
+    assert db_row.data[0]["request_count"] == 500
 
     # Via raise_for_subscriber_key -> 429
     with pytest.raises(HTTPException) as exc_info:
