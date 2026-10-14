@@ -62,3 +62,28 @@ async def get_tool(tool_id: str):
         raise HTTPException(status_code=404, detail="الأداة غير موجودة")
 
     return resp.data[0]
+
+@router.get("/plans")
+async def list_plans():
+    """
+    List all active plans (public).
+    Used by dashboard for the payments/pricing tab.
+    """
+    client = get_supabase_client()
+    if client is None:
+        raise HTTPException(status_code=503, detail="الخدمة غير متاحة مؤقتاً")
+
+    try:
+        resp = (
+            client.table("plans")
+            .select("id, name, display_name, price_usd, max_requests, billing_period, rate_limit_per_min, allowed_tools")
+            .eq("is_active", True)
+            .order("name")
+            .order("billing_period")
+            .execute()
+        )
+    except Exception:
+        logger.exception("list plans failed")
+        raise HTTPException(status_code=503, detail="تعذّر جلب الخطط")
+
+    return {"plans": resp.data or []}
