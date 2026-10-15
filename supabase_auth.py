@@ -110,6 +110,8 @@ def verify_subscriber_key(api_key: str, tool_name: str) -> Optional[dict]:
         "current_usage": row.get("current_usage", 0),
         "max_requests": row.get("max_requests", 0),
         "rate_limit_per_min": row.get("rate_limit_per_min", 0),
+        "rate_allowed": row.get("rate_allowed", True),
+        "rate_current": row.get("rate_current", 0),
     }
 
 
@@ -124,6 +126,15 @@ def raise_for_subscriber_key(api_key: str, tool_name: str) -> dict:
         raise HTTPException(
             status_code=401,
             detail="مفتاح API غير صالح",
+        )
+
+    if not result.get("rate_allowed", True):
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"تجاوز حد الطلبات "
+                f"({result['rate_current']}/{result['rate_limit_per_min']} في الدقيقة)"
+            ),
         )
 
     if not result["allowed"]:
