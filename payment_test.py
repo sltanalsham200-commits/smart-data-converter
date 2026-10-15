@@ -26,15 +26,25 @@ class TestPaymentProvider(PaymentProvider):
         self, *, amount_usd, subscriber_id, plan_id, billing_period, intent_id, return_url=None
     ) -> dict:
         external_id = "test_" + secrets.token_hex(8)
+        # Network can be overridden via env for testing
+        network = os.environ.get("TEST_NETWORK", "TRC20").upper()
+        currency = os.environ.get("TEST_CURRENCY", "USDT").upper()
+        # Validate network
+        valid_networks = ("TRC20", "BEP20", "ERC20", "SOL", "BTC", "POLYGON")
+        if network not in valid_networks:
+            network = "TRC20"
+        valid_currencies = ("USDT", "USDC", "BTC", "ETH", "SOL", "USD")
+        if currency not in valid_currencies:
+            currency = "USDT"
         return {
             "external_id": external_id,
             "pay_url": f"https://test.local/pay/{external_id}",
-            "address": "TEST-ADDRESS",
+            "address": f"TEST-{network}-ADDRESS",
             "amount_crypto": amount_usd,
-            "currency": "USDT",
-            "network": "TRC20",
+            "currency": currency,
+            "network": network,
             "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
-            "raw": {"test_mode": True, "intent_id": intent_id},
+            "raw": {"test_mode": True, "intent_id": intent_id, "network": network},
         }
 
     async def verify_and_parse_webhook(self, *, body_bytes, headers) -> dict:
