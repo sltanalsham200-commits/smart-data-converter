@@ -1,38 +1,56 @@
 """
 Kazawallet payment provider.
 
-⚠️ STATUS: SKELETON — awaiting merchant account + official API docs.
+Official API reference (from merchant dashboard / help center):
+- Base URL: https://outdoor.kasroad.com/wallet
+- Create Payment Link: POST /createPaymentLink
+- Webhook signature: SHA-256(amount + ':::' + order_id + ':::' + api_key)
 
-Reference (to be verified before production):
-- Merchant: https://www.kazawallet.com/ar/merchant
-- API docs: https://www.kazawallet.com/api-docs
-- Terms:    https://www.kazawallet.com/terms-of-service
+Required env vars:
+- KAZAWALLET_API_KEY         (x-api-key)
+- KAZAWALLET_API_SECRET      (x-api-secret)
+- KAZAWALLET_MERCHANT_EMAIL  (merchant-email header)
+- KAZAWALLET_BASE_URL        (default: https://outdoor.kasroad.com/wallet)
+- KAZAWALLET_ENV             (dev|production — default: production)
 
-Before going live, MUST:
-1. Read current official API docs (endpoints, request/response shapes,
-   signature algorithm, webhook format).
-2. Fill in the TODO sections below with verified values.
-3. Test against sandbox or staging (if provided).
-4. Test with a small real payment (user-approved).
+Payment method IDs (Production):
+- TRC20 = 118
+- BEP20 = 115
+- ERC20 = 116
+- SOL   = 117
 
-Required env vars (when activated):
-- KAZAWALLET_API_KEY       — merchant API key
-- KAZAWALLET_API_SECRET    — merchant API secret (never logged)
-- KAZAWALLET_WEBHOOK_SECRET — webhook signing secret
-- KAZAWALLET_BASE_URL      — e.g. https://api.kazawallet.com
+Development:
+- TRC20 = 15
+- BEP20 = 13
+
+Note: Webhook fires once — must be idempotent at the service layer.
 """
 import hashlib
 import hmac
+import json
 import logging
 import os
+from datetime import datetime, timezone, timedelta
 from typing import Optional
+
+import httpx
 
 from payment_provider import PaymentProvider
 
 logger = logging.getLogger("payment_kazawallet")
 
+# Payment method IDs per environment
+METHOD_IDS = {
+    "production": {"TRC20": "118", "BEP20": "115", "ERC20": "116", "SOL": "117"},
+    "development": {"TRC20": "15", "BEP20": "13"},
+}
+
 
 class KazawalletNotConfigured(RuntimeError):
+    pass
+
+
+class KazawalletAPIError(RuntimeError):
     pass
 
 
@@ -42,21 +60,54 @@ class KazawalletProvider(PaymentProvider):
     def __init__(self):
         self.api_key = os.environ.get("KAZAWALLET_API_KEY", "").strip()
         self.api_secret = os.environ.get("KAZAWALLET_API_SECRET", "").strip()
-        self.webhook_secret = os.environ.get("KAZAWALLET_WEBHOOK_SECRET", "").strip()
-        self.base_url = os.environ.get("KAZAWALLET_BASE_URL", "").strip().rstrip("/")
+        self.merchant_email = os.environ.get("KAZAWALLET_MERCHANT_EMAIL", "").strip()
+        self.base_url = (
+            os.environ.get("KAZAWALLET_BASE_URL", "https://outdoor.kasroad.com/wallet")
+            .strip()
+            .rstrip("/")
+        )
+        self.env = os.environ.get("KAZAWALLET_ENV", "production").strip().lower()
+        if self.env not in ("production", "development"):
+            self.env = "production"
 
         missing = [
-            name for name, val in [
+            name
+            for name, val in [
                 ("KAZAWALLET_API_KEY", self.api_key),
                 ("KAZAWALLET_API_SECRET", self.api_secret),
-                ("KAZAWALLET_WEBHOOK_SECRET", self.webhook_secret),
-                ("KAZAWALLET_BASE_URL", self.base_url),
-            ] if not val
+                ("KAZAWALLET_MERCHANT_EMAIL", self.merchant_email),
+            ]
+            if not val
         ]
         if missing:
-            raise KazawalletNotConfigured(
-                "Missing env vars: " + ", ".join(missing)
-            )
+            raise KazawalletNotConfigured("Missing env vars: " + ", ".join(missing))
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def _headers(self, with_secret: bool = True) -> dict:
+        h = {
+            "x-api-key": self.api_key,
+            "merchant-email": self.merchant_email,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if with_secret:
+            h["x-api-secret"] = self.api_secret
+        return h
+
+    def _method_id(self, network: Optional[str]) -> Optional[str]:
+        if not network:
+            return None
+        mapping = METHOD_IDS.get(self.env, {})
+        return mapping.get(network.upper())
+
+    def _compute_signature(self, amount: str, order_id: str) -> str:
+        """
+        Official formula: SHA-256(amount + ':::' + order_id + ':::' + api_key)
+        """
+        raw = f"{amount}:::{order_id}:::{self.api_key}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     # ------------------------------------------------------------------
     # create_payment
@@ -72,90 +123,133 @@ class KazawalletProvider(PaymentProvider):
         return_url: Optional[str] = None,
     ) -> dict:
         """
-        TODO: Implement per official docs.
+        Create a payment link at Kazawallet.
 
-        Required steps (verify exact names/fields in docs):
-        1. Build request body with:
-             - amount (amount_usd or its crypto equivalent)
-             - currency (USDT)
-             - network (TRC20 / ERC20 / BEP20 — whatever merchant supports)
-             - order_id / reference (use intent_id)
-             - callback_url (our webhook)
-             - return_url (optional)
-        2. Sign the request using KAZAWALLET_API_SECRET
-           (algorithm to be confirmed — likely HMAC-SHA256).
-        3. POST to `{base_url}/<PAYMENT_ENDPOINT>` (verify exact path).
-        4. Parse response → return normalized dict:
-             external_id, pay_url, address, amount_crypto,
-             currency, network, expires_at, raw.
-        5. NEVER log api_secret or full signature.
+        Per docs:
+          POST {base_url}/createPaymentLink
+          body: { amount, currency, email, ref, redirectUrl }
+          -> response: { payment_url, transaction_id, ... }
         """
-        raise NotImplementedError(
-            "Kazawallet create_payment pending official API docs. "
-            "Fill in after merchant account approval."
+        payload = {
+            "amount": f"{amount_usd:.2f}",
+            "currency": "USD",
+            "email": self.merchant_email,
+            "ref": intent_id,
+        }
+        if return_url:
+            payload["redirectUrl"] = return_url
+
+        url = f"{self.base_url}/createPaymentLink"
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(url, headers=self._headers(), json=payload)
+        except Exception as e:
+            logger.exception("kazawallet create_payment HTTP failed")
+            raise KazawalletAPIError(f"HTTP error: {type(e).__name__}") from e
+
+        if resp.status_code >= 400:
+            body_snippet = (resp.text or "")[:200]
+            logger.warning("kazawallet create_payment HTTP %s: %s",
+                           resp.status_code, body_snippet)
+            raise KazawalletAPIError(f"HTTP {resp.status_code}")
+
+        try:
+            data = resp.json()
+        except Exception:
+            raise KazawalletAPIError("Invalid JSON response")
+
+        # Response shape per docs (best-effort extraction — some fields
+        # may vary by API version; we accept common aliases).
+        payment_url = (
+            data.get("payment_url")
+            or data.get("paymentUrl")
+            or data.get("url")
         )
+        transaction_id = (
+            data.get("transaction_id")
+            or data.get("transactionId")
+            or data.get("order_id")
+            or data.get("orderId")
+        )
+        if not payment_url or not transaction_id:
+            logger.warning("kazawallet unexpected response keys: %s",
+                           list(data.keys()))
+            raise KazawalletAPIError("Missing payment_url or transaction_id")
+
+        return {
+            "external_id": str(transaction_id),
+            "pay_url": payment_url,
+            "address": data.get("address") or data.get("wallet_address"),
+            "amount_crypto": data.get("amount_crypto") or amount_usd,
+            "currency": data.get("currency") or "USDT",
+            "network": data.get("network"),
+            "expires_at": data.get("expires_at")
+                          or (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
+            "raw": data,
+        }
 
     # ------------------------------------------------------------------
     # verify_and_parse_webhook
     # ------------------------------------------------------------------
     async def verify_and_parse_webhook(self, *, body_bytes: bytes, headers: dict) -> dict:
         """
-        TODO: Implement per official docs.
+        Verify Kazawallet webhook signature.
 
-        Required steps (verify exact scheme in docs):
-        1. Extract the signature from the header name Kazawallet uses
-           (common candidates: X-Signature, Signature, X-Kaza-Signature).
-        2. Recompute HMAC over body (algorithm TBD — likely SHA-256 or SHA-512).
-        3. Compare using `hmac.compare_digest` (timing-safe).
-        4. Reject with ValueError if signature mismatch.
-        5. Parse JSON payload.
-        6. Return normalized dict:
-             external_id, intent_id, status,
-             amount, currency, network, tx_hash, raw.
-        7. Map Kazawallet's status values → our normalized set:
-             confirmed | failed | pending | seen
+        Per docs:
+          Webhook payload includes: order_id, secret, amount, ref, status, currency
+          secret = SHA-256(amount + ':::' + order_id + ':::' + api_key)
+          status ∈ {fulfilled, timed_out}
         """
-        raise NotImplementedError(
-            "Kazawallet webhook verification pending official API docs."
-        )
+        try:
+            payload = json.loads(body_bytes.decode("utf-8"))
+        except Exception:
+            raise ValueError("Invalid JSON payload")
+
+        order_id = str(payload.get("order_id", ""))
+        amount = str(payload.get("amount", ""))
+        received_secret = str(payload.get("secret", ""))
+        ref = payload.get("ref")            # our intent_id
+        status_raw = str(payload.get("status", "")).lower()
+        currency = payload.get("currency", "USDT")
+
+        if not (order_id and amount and received_secret):
+            raise ValueError("Missing required webhook fields")
+
+        expected = self._compute_signature(amount, order_id)
+        if not hmac.compare_digest(expected, received_secret):
+            raise ValueError("Invalid signature")
+
+        # Normalize status
+        if status_raw in ("fulfilled", "completed", "success", "paid"):
+            normalized = "confirmed"
+        elif status_raw in ("timed_out", "timeout", "expired", "failed", "cancelled"):
+            normalized = "failed"
+        else:
+            normalized = "pending"
+
+        return {
+            "external_id": order_id,
+            "intent_id": ref,
+            "status": normalized,
+            "amount": float(amount),
+            "currency": currency or "USDT",
+            "network": payload.get("network"),
+            "tx_hash": payload.get("tx_hash") or payload.get("hash"),
+            "raw": payload,
+        }
 
     # ------------------------------------------------------------------
     # health
     # ------------------------------------------------------------------
     async def health(self) -> dict:
         """
-        TODO: Implement a lightweight ping.
-        Until then, report 'unimplemented' so monitoring does not
-        wrongly assume health.
+        Lightweight configuration check (no external call).
+        Returns ok=True if credentials present; ok=False otherwise.
         """
+        configured = all([self.api_key, self.api_secret, self.merchant_email])
         return {
-            "ok": False,
-            "details": "kazawallet adapter not yet implemented",
+            "ok": configured,
+            "details": (
+                f"env={self.env}, configured={'yes' if configured else 'no'}"
+            ),
         }
-
-    # ------------------------------------------------------------------
-    # Helpers (used once implementation begins)
-    # ------------------------------------------------------------------
-    def _sign_hmac(self, payload: bytes, algo: str = "sha256") -> str:
-        """
-        Generic HMAC signer — DO NOT use until confirmed against docs.
-        Kept here so implementation has a single place to define signing.
-        """
-        if algo == "sha256":
-            digest = hashlib.sha256
-        elif algo == "sha512":
-            digest = hashlib.sha512
-        else:
-            raise ValueError(f"Unsupported algo: {algo}")
-        return hmac.new(self.api_secret.encode(), payload, digest).hexdigest()
-
-    def _verify_webhook_signature(
-        self, body_bytes: bytes, signature: str, algo: str = "sha256"
-    ) -> bool:
-        """
-        Generic webhook signature verifier — DO NOT use until confirmed.
-        """
-        expected = hmac.new(
-            self.webhook_secret.encode(), body_bytes, hashlib.sha256
-        ).hexdigest()
-        return hmac.compare_digest(expected, signature or "")
